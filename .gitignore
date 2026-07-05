@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.installed.cfg
+
+# Environments
+.venv/
+venv/
+env/
+.env
+
+# Caches / checkpoints / data (not distributed)
+data_cache/
+artifacts/
+checkpoints/
+*.npy
+*.npz
+*.pkl
+*.ckpt
+*.pt
+*.pth
+
+# Notebooks / editors
+.ipynb_checkpoints/
+.idea/
+.vscode/
+
+# OS
+.DS_Store
