@@ -77,16 +77,16 @@ The main paper setting uses VitalDB at 2 s resolution:
 | Item | Setting |
 |---|---:|
 | Dynamic inputs | ART_MBP, ART_SBP |
-| Static inputs | age, sex, BMI, ASA |
 | History window | 15 min, 450 steps |
 | Prediction horizon | 5 min, 150 steps |
 | IOH threshold | MAP < 65 mmHg |
 | IOH duration | 1 min, 30 steps |
 
 The training pipeline expects preprocessed train/validation/test pickle files
-and normalization statistics. Event-KL training also expects an offline teacher
-cache aligned to the dataset splits. The teacher cache stores the Chronos-2 q10
-forecast for each sample and is used only during training.
+and normalization statistics for the two dynamic features. Event-KL training
+also expects an offline teacher cache aligned to the dataset splits. The teacher
+cache stores the Chronos-2 q10 forecast for each sample and is used only during
+training.
 
 ## Main Results
 
@@ -133,4 +133,3 @@ sustained hypotension windows.
   sliding-window sample generation to avoid leakage.
 - Teacher quantile selection is performed on validation data; the main method
   uses q10.
-

@@ -47,10 +47,8 @@ def build_future_query_decoder(config: dict[str, Any]) -> FutureQueryIOHDecoder:
     return FutureQueryIOHDecoder(
         history_len=int(model.get("history_len", 450)),
         pred_len=int(model.get("pred_len", 150)),
-        dynamic_channels=int(model.get("dynamic_channels", 6)),
-        static_dim=int(model.get("static_dim", 4)),
-        medicine_channels=int(model.get("medicine_channels", 7)),
-        map_channel=int(model.get("map_channel", 1)),
+        dynamic_channels=int(model.get("dynamic_channels", 2)),
+        map_channel=int(model.get("map_channel", 0)),
         d_model=int(model.get("d_model", 128)),
         d_ff=int(model.get("d_ff", 256)),
         n_heads=int(model.get("n_heads", 8)),
@@ -59,13 +57,8 @@ def build_future_query_decoder(config: dict[str, Any]) -> FutureQueryIOHDecoder:
         patch_size=int(model.get("patch_size", model.get("patch_kernel", 15))),
         moving_avg_kernel=int(model.get("moving_avg_kernel", 25)),
         dropout=float(model.get("dropout", 0.1)),
-        medication_decay_seconds=float(model.get("medication_decay_seconds", 180.0)),
-        medication_clip_seconds=float(model.get("medication_clip_seconds", 900.0)),
-        use_medication_mask=bool(model.get("use_medication_mask", True)),
         residual_prediction=bool(model.get("residual_prediction", True)),
         dynamic_indices=dynamic_indices,
-        use_medication_features=bool(model.get("use_medication_features", True)),
-        use_static_context=bool(model.get("use_static_context", True)),
     )
 
 

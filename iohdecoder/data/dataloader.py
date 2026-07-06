@@ -26,10 +26,11 @@ class IOHDataset(Dataset):
         column_names = self.config["column_names"]
 
         self.history_len = int(data_params["history_len"])
-        self.sample_interval_seconds = float(data_params.get("sample_interval_seconds", 2.0))
-        self.dynamic_features = feature_defs["dynamic_features"]
-        self.static_features = feature_defs["static_features"]
-        self.medicine_features = feature_defs["medicine_ST_features"]
+        self.dynamic_features = list(feature_defs["dynamic_features"])
+        if len(self.dynamic_features) != 2:
+            raise ValueError(
+                "IOHDecoder release expects exactly two dynamic features: ART_MBP and ART_SBP."
+            )
         self.target_col = column_names["target_col"]
         self.main_seq_col = column_names.get("main_seq_col", "Solar8000/ART_MBP")
 
@@ -62,7 +63,7 @@ class IOHDataset(Dataset):
             return load_yaml_config(path)
         if self.verbose:
             print(f"Warning: normalization statistics were not found at {path}; raw values will be used.")
-        return {"dynamic": {}, "static": {}}
+        return {"dynamic": {}}
 
     @staticmethod
     def _parse_serialized_value(val):
@@ -99,13 +100,8 @@ class IOHDataset(Dataset):
             return np.interp(dst_idx, src_idx, arr).astype(np.float32, copy=False)
 
         pad_len = expected_len - current_len
-        if scalar_mode == "pharma" and current_len > 0:
-            step = np.float32(self.sample_interval_seconds)
-            start = np.float32(arr[-1]) + step
-            pad = start + np.arange(pad_len, dtype=np.float32) * step
-        else:
-            pad_value = np.float32(arr[-1])
-            pad = np.full(pad_len, pad_value, dtype=np.float32)
+        pad_value = np.float32(arr[-1])
+        pad = np.full(pad_len, pad_value, dtype=np.float32)
         return np.concatenate([arr, pad], axis=0).astype(np.float32, copy=False)
 
     def _print_length_adjust_summary(self):
@@ -123,11 +119,6 @@ class IOHDataset(Dataset):
         arr = np.asarray(val, dtype=np.float32)
         if arr.ndim == 0:
             scalar = float(arr.item())
-            if scalar_mode == "pharma":
-                if scalar == float("-inf"):
-                    return np.full(expected_len, float("-inf"), dtype=np.float32)
-                step = np.float32(self.sample_interval_seconds)
-                return np.float32(scalar) + np.arange(expected_len, dtype=np.float32) * step
             if scalar_mode == "repeat":
                 return np.full(expected_len, scalar, dtype=np.float32)
             raise ValueError(f"Unsupported scalar_mode: {scalar_mode}")
@@ -168,54 +159,6 @@ class IOHDataset(Dataset):
             dyn_blocks.append(col_arr)
         self.x_dyn = np.stack(dyn_blocks, axis=1).astype(np.float32, copy=False)
 
-    def _build_static_cache(self):
-        stat_arr = self.df[self.static_features].to_numpy(dtype=np.float32, copy=True)
-        if self.normalize:
-            means = []
-            stds = []
-            static_stats = self.norm_stats.get("static", {})
-            for col in self.static_features:
-                col_stat = static_stats.get(col, {"mean": 0.0, "std": 1.0})
-                means.append(float(col_stat["mean"]))
-                std = float(col_stat["std"])
-                stds.append(1.0 if std < 1e-6 else std)
-            stat_arr = (stat_arr - np.asarray(means, dtype=np.float32)) / np.asarray(stds, dtype=np.float32)
-        self.x_stat = stat_arr.astype(np.float32, copy=False)
-
-    def _build_pharma_cache(self):
-        pharma_blocks = []
-        for col in tqdm(
-            self.medicine_features,
-            desc="Parse medicine features",
-            leave=False,
-            disable=not self.verbose,
-            file=self.progress_file,
-        ):
-            col_values = self.df[col].tolist()
-            col_arr = np.stack(
-                [
-                    self._to_fixed_length_array(val, self.history_len, scalar_mode="pharma")
-                    for val in tqdm(
-                        col_values,
-                        desc=f"{col.split('/')[-1]}",
-                        leave=False,
-                        disable=not self.verbose,
-                        file=self.progress_file,
-                    )
-                ],
-                axis=0,
-            ).astype(np.float32, copy=False)
-            pharma_blocks.append(col_arr)
-
-        pharma_raw = np.stack(pharma_blocks, axis=1).astype(np.float32, copy=False)
-        valid_mask = pharma_raw != float("-inf")
-        self._event_flags = np.any(
-            valid_mask & (pharma_raw >= 0.0) & (pharma_raw <= 90.0),
-            axis=(1, 2),
-        ).astype(np.int64)
-        self.p_mask = valid_mask.astype(np.float32, copy=False)
-        self.x_pharma = np.where(valid_mask, pharma_raw, 0.0).astype(np.float32, copy=False)
-
     def _build_target_cache(self):
         target_values = self.df[self.target_col].tolist()
         target_arr = np.stack(
@@ -239,7 +182,7 @@ class IOHDataset(Dataset):
         if self.verbose:
             print(f"[Dataset] Pre-parsing cached arrays from {len(self.df)} samples...")
         with tqdm(
-            total=4,
+            total=2,
             desc="Dataset cache build",
             leave=False,
             disable=not self.verbose,
@@ -247,17 +190,9 @@ class IOHDataset(Dataset):
         ) as pbar:
             self._build_dynamic_cache()
             pbar.update(1)
-            self._build_static_cache()
-            pbar.update(1)
-            self._build_pharma_cache()
-            pbar.update(1)
             self._build_target_cache()
             pbar.update(1)
         self.num_samples = int(self.y_true.shape[0])
-
-    @property
-    def event_flags(self):
-        return self._event_flags
 
     def __len__(self):
         return self.num_samples
@@ -266,9 +201,6 @@ class IOHDataset(Dataset):
         return {
             "index": torch.tensor(idx, dtype=torch.long),
             "x_dyn": torch.from_numpy(self.x_dyn[idx]),
-            "x_stat": torch.from_numpy(self.x_stat[idx]),
-            "x_pharma": torch.from_numpy(self.x_pharma[idx]),
-            "p_mask": torch.from_numpy(self.p_mask[idx]),
             "y_true": torch.from_numpy(self.y_true[idx]),
         }
 
