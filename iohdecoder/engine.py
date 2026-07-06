@@ -16,8 +16,7 @@ from tqdm import tqdm
 from iohdecoder.data import get_ioh_loader
 from iohdecoder.losses import TeacherAdvantagedEventDistillationLoss
 from iohdecoder.metrics import ClinicalEvaluator
-from iohdecoder.models import CrossformerFutureQueryIOHDecoder, FutureQueryIOHDecoder, HMFForecaster
-from iohdecoder.models.supervised import SUPERVISED_BASELINE_TYPES, build_supervised_baseline
+from iohdecoder.model import FutureQueryIOHDecoder
 from iohdecoder.teachers import SplitTeacherCache
 from iohdecoder.utils import load_yaml_config, project_abs_path
 
@@ -42,21 +41,6 @@ def extract_prediction(output: torch.Tensor | dict[str, torch.Tensor]) -> torch.
     return output
 
 
-def build_hmf(config: dict[str, Any]) -> HMFForecaster:
-    model = config.get("model", {})
-    return HMFForecaster(
-        history_len=int(model.get("history_len", 450)),
-        pred_len=int(model.get("pred_len", 150)),
-        d_model=int(model.get("d_model", 64)),
-        d_ff=int(model.get("d_ff", 128)),
-        n_heads=int(model.get("n_heads", 8)),
-        n_layers=int(model.get("n_layers", 2)),
-        dropout=float(model.get("dropout", 0.1)),
-        patch_size=int(model.get("patch_size", model.get("patch_kernel", 15))),
-        moving_avg_kernel=int(model.get("moving_avg_kernel", 25)),
-    )
-
-
 def build_future_query_decoder(config: dict[str, Any]) -> FutureQueryIOHDecoder:
     model = config.get("model", {})
     dynamic_indices = model.get("dynamic_indices")
@@ -72,6 +56,8 @@ def build_future_query_decoder(config: dict[str, Any]) -> FutureQueryIOHDecoder:
         n_heads=int(model.get("n_heads", 8)),
         encoder_layers=int(model.get("encoder_layers", 2)),
         decoder_layers=int(model.get("decoder_layers", 2)),
+        patch_size=int(model.get("patch_size", model.get("patch_kernel", 15))),
+        moving_avg_kernel=int(model.get("moving_avg_kernel", 25)),
         dropout=float(model.get("dropout", 0.1)),
         medication_decay_seconds=float(model.get("medication_decay_seconds", 180.0)),
         medication_clip_seconds=float(model.get("medication_clip_seconds", 900.0)),
@@ -83,39 +69,11 @@ def build_future_query_decoder(config: dict[str, Any]) -> FutureQueryIOHDecoder:
     )
 
 
-def build_crossformer_future_query_decoder(config: dict[str, Any]) -> CrossformerFutureQueryIOHDecoder:
-    model = config.get("model", {})
-    return CrossformerFutureQueryIOHDecoder(
-        history_len=int(model.get("history_len", 450)),
-        pred_len=int(model.get("pred_len", 150)),
-        enc_in=int(model.get("enc_in", 20)),
-        static_dim=int(model.get("static_dim", 4)),
-        target_channel=int(model.get("target_channel", model.get("map_channel", 1))),
-        d_model=int(model.get("d_model", 128)),
-        n_heads=int(model.get("n_heads", 8)),
-        e_layers=int(model.get("e_layers", model.get("encoder_layers", 3))),
-        d_ff=int(model.get("d_ff", 256)),
-        seg_len=int(model.get("seg_len", 12)),
-        win_size=int(model.get("win_size", 2)),
-        factor=int(model.get("factor", 10)),
-        decoder_layers=int(model.get("decoder_layers", 2)),
-        dropout=float(model.get("dropout", 0.1)),
-        residual_prediction=bool(model.get("residual_prediction", True)),
-        memory_scales=str(model.get("memory_scales", "final")),
-    )
-
-
 def build_model(config: dict[str, Any]) -> nn.Module:
-    model_type = str(config.get("model", {}).get("type", "hmf")).lower()
-    if model_type in {"hmf", "hmf_forecaster"}:
-        return build_hmf(config)
+    model_type = str(config.get("model", {}).get("type", "future_query_decoder")).lower()
     if model_type in {"future_query", "future_query_decoder", "iohdecoder"}:
         return build_future_query_decoder(config)
-    if model_type in {"crossformer_fq", "crossformer_fq_decoder", "crossformer_future_query"}:
-        return build_crossformer_future_query_decoder(config)
-    if model_type in SUPERVISED_BASELINE_TYPES:
-        return build_supervised_baseline(config.get("model", {}))
-    raise ValueError(f"Unsupported model.type: {model_type}")
+    raise ValueError(f"Unsupported model.type: {model_type}. This release keeps only the IOHDecoder method.")
 
 
 def prepare_config(config_path: str | Path) -> tuple[dict[str, Any], torch.device, str, Path]:
@@ -175,19 +133,9 @@ def build_objective(
         point_temperature=float(loss_cfg.get("point_temperature", 2.0)),
         softmin_beta=float(loss_cfg.get("softmin_beta", 12.0)),
         weight=float(loss_cfg.get("weight", 0.0)),
-        margin=float(loss_cfg.get("margin", 0.0)),
-        advantage_power=float(loss_cfg.get("advantage_power", 1.0)),
         teacher_is_normalized=bool(loss_cfg.get("teacher_is_normalized", False)),
         regression=str(loss_cfg.get("regression", "mse")),
         mode=str(loss_cfg.get("mode", "event_kl")),
-        softdtw_weight=float(loss_cfg.get("softdtw_weight", 0.05)),
-        softdtw_gamma=float(loss_cfg.get("softdtw_gamma", 0.1)),
-        softdtw_band=int(loss_cfg.get("softdtw_band", 15)),
-        relation_lags=loss_cfg.get("relation_lags", (1, 5, 15, 30)),
-        saliency_alpha=float(loss_cfg.get("saliency_alpha", 2.0)),
-        event_saliency_gamma=float(loss_cfg.get("event_saliency_gamma", 1.0)),
-        target_saliency_gamma=float(loss_cfg.get("target_saliency_gamma", 1.0)),
-        dynamic_regression=bool(loss_cfg.get("dynamic_regression", False)),
         target_mean=target_mean,
         target_std=target_std,
     )
@@ -342,10 +290,6 @@ def train_experiment(config_path: str | Path) -> Path:
     return checkpoint
 
 
-def train_hmf(config_path: str | Path) -> Path:
-    return train_experiment(config_path)
-
-
 @torch.no_grad()
 def evaluate_experiment(config_path: str | Path) -> dict[str, float]:
     config, device, data_path, result_dir, model = prepare(config_path)
@@ -383,8 +327,3 @@ def evaluate_experiment(config_path: str | Path) -> dict[str, float]:
     with open(result_dir / "metrics.json", "w", encoding="utf-8") as handle:
         json.dump({key: float(value) for key, value in metrics.items()}, handle, indent=2)
     return metrics
-
-
-@torch.no_grad()
-def evaluate_hmf(config_path: str | Path) -> dict[str, float]:
-    return evaluate_experiment(config_path)

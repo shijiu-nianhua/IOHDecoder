@@ -1,12 +1,4 @@
-"""Future-query cross-attention decoder for IOH forecasting.
-
-The decoder keeps the key idea deliberately narrow: each future MAP step owns a
-learnable query token and attends to a historical memory encoded from vital
-signs. In the paper protocol, the vital input is restricted to MAP/SBP. This
-gives every horizon step an explicit route to retrieve different parts of the
-same patient history instead of producing the horizon with one pooled
-representation.
-"""
+"""HMF encoder plus future-query cross-attention decoder for IOH forecasting."""
 
 from __future__ import annotations
 
@@ -14,6 +6,8 @@ from dataclasses import dataclass
 
 import torch
 from torch import nn
+
+from iohdecoder.model.hmf_encoder import HMFEncoder
 
 
 @dataclass(frozen=True)
@@ -29,6 +23,8 @@ class FutureQueryDecoderConfig:
     n_heads: int = 8
     encoder_layers: int = 2
     decoder_layers: int = 2
+    patch_size: int = 15
+    moving_avg_kernel: int = 25
     dropout: float = 0.1
     medication_decay_seconds: float = 180.0
     medication_clip_seconds: float = 900.0
@@ -39,32 +35,8 @@ class FutureQueryDecoderConfig:
     use_static_context: bool = False
 
 
-class MedicationEffectFeatures(nn.Module):
-    """Convert raw medication timing channels into smooth effect features."""
-
-    def __init__(
-        self,
-        decay_seconds: float = 180.0,
-        clip_seconds: float = 900.0,
-        include_mask: bool = True,
-    ) -> None:
-        super().__init__()
-        self.decay_seconds = max(float(decay_seconds), 1.0)
-        self.clip_seconds = max(float(clip_seconds), 1.0)
-        self.include_mask = bool(include_mask)
-
-    def forward(self, x_pharma: torch.Tensor, p_mask: torch.Tensor) -> torch.Tensor:
-        x_pharma = x_pharma.float()
-        p_mask = p_mask.float()
-        clipped = x_pharma.clamp(min=0.0, max=self.clip_seconds)
-        decay = torch.exp(-clipped / self.decay_seconds) * p_mask
-        if self.include_mask:
-            return torch.cat([decay, p_mask], dim=1)
-        return decay
-
-
 class FutureQueryIOHDecoder(nn.Module):
-    """MAP/SBP historical encoder plus future-query cross-attention decoder."""
+    """HMF historical encoder plus horizon-specific future-query decoder."""
 
     def __init__(
         self,
@@ -79,6 +51,8 @@ class FutureQueryIOHDecoder(nn.Module):
         n_heads: int = 8,
         encoder_layers: int = 2,
         decoder_layers: int = 2,
+        patch_size: int = 15,
+        moving_avg_kernel: int = 25,
         dropout: float = 0.1,
         medication_decay_seconds: float = 180.0,
         medication_clip_seconds: float = 900.0,
@@ -88,6 +62,8 @@ class FutureQueryIOHDecoder(nn.Module):
         use_medication_features: bool = False,
         use_static_context: bool = False,
     ) -> None:
+        del medication_decay_seconds, medication_clip_seconds, use_medication_mask
+
         super().__init__()
         if d_model % n_heads != 0:
             raise ValueError("d_model must be divisible by n_heads.")
@@ -101,29 +77,25 @@ class FutureQueryIOHDecoder(nn.Module):
         self.dynamic_indices = tuple(int(index) for index in dynamic_indices) if dynamic_indices is not None else None
         self.use_medication_features = bool(use_medication_features)
         self.use_static_context = bool(use_static_context)
+        if self.use_medication_features:
+            raise ValueError("The paper release uses the HMF MAP/SBP encoder and does not encode medication channels.")
 
-        self.medication_features = MedicationEffectFeatures(
-            decay_seconds=medication_decay_seconds,
-            clip_seconds=medication_clip_seconds,
-            include_mask=use_medication_mask,
-        )
-        medication_feature_dim = self.medicine_channels * (2 if use_medication_mask else 1)
-        if not self.use_medication_features:
-            medication_feature_dim = 0
-        encoder_input_dim = self.dynamic_channels + medication_feature_dim
-
-        self.input_projection = nn.Sequential(
-            nn.Linear(encoder_input_dim, d_model),
-            nn.LayerNorm(d_model),
-            nn.GELU(),
-            nn.Dropout(dropout),
+        self.hmf_encoder = HMFEncoder(
+            history_len=self.history_len,
+            channels=self.dynamic_channels,
+            d_model=d_model,
+            d_ff=d_ff,
+            n_heads=n_heads,
+            n_layers=encoder_layers,
+            dropout=dropout,
+            patch_size=patch_size,
+            moving_avg_kernel=moving_avg_kernel,
         )
         self.static_projection = nn.Sequential(
             nn.Linear(self.static_dim, d_model),
             nn.LayerNorm(d_model),
             nn.GELU(),
         )
-        self.history_position = nn.Embedding(self.history_len, d_model)
         self.future_query = nn.Embedding(self.pred_len, d_model)
         self.horizon_projection = nn.Sequential(
             nn.Linear(1, d_model),
@@ -135,17 +107,6 @@ class FutureQueryIOHDecoder(nn.Module):
             nn.Linear(d_model, d_model),
             nn.GELU(),
         )
-
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model,
-            nhead=n_heads,
-            dim_feedforward=d_ff,
-            dropout=dropout,
-            activation="gelu",
-            batch_first=True,
-            norm_first=True,
-        )
-        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=encoder_layers)
 
         decoder_layer = nn.TransformerDecoderLayer(
             d_model=d_model,
@@ -174,7 +135,7 @@ class FutureQueryIOHDecoder(nn.Module):
     def from_config(cls, cfg: FutureQueryDecoderConfig) -> "FutureQueryIOHDecoder":
         return cls(**cfg.__dict__)
 
-    def _history_tokens(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+    def _history_memory(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
         x_dyn = batch["x_dyn"].float()
         if x_dyn.shape[-1] != self.history_len:
             raise ValueError(f"Expected history_len={self.history_len}, got {x_dyn.shape[-1]}.")
@@ -183,19 +144,10 @@ class FutureQueryIOHDecoder(nn.Module):
             x_dyn = x_dyn.index_select(1, index)
         if x_dyn.shape[1] != self.dynamic_channels:
             raise ValueError(f"Expected dynamic_channels={self.dynamic_channels}, got {x_dyn.shape[1]}.")
-
-        if self.use_medication_features:
-            med = self.medication_features(batch["x_pharma"], batch["p_mask"])
-            features = torch.cat([x_dyn, med], dim=1).transpose(1, 2)
-        else:
-            features = x_dyn.transpose(1, 2)
-        tokens = self.input_projection(features)
-
-        positions = torch.arange(self.history_len, device=tokens.device)
-        tokens = tokens + self.history_position(positions).unsqueeze(0)
+        memory = self.hmf_encoder(x_dyn.transpose(1, 2))
         if self.use_static_context:
-            tokens = tokens + self.static_projection(batch["x_stat"].float()).unsqueeze(1)
-        return tokens
+            memory = memory + self.static_projection(batch["x_stat"].float()).unsqueeze(1)
+        return memory
 
     def _future_queries(self, memory: torch.Tensor, x_stat: torch.Tensor) -> torch.Tensor:
         batch_size = memory.shape[0]
@@ -209,7 +161,7 @@ class FutureQueryIOHDecoder(nn.Module):
         return query
 
     def forward(self, batch: dict[str, torch.Tensor], return_dict: bool = False):
-        memory = self.encoder(self._history_tokens(batch))
+        memory = self._history_memory(batch)
         decoded = self.decoder(self._future_queries(memory, batch["x_stat"]), memory)
         residual = self.output_head(decoded).squeeze(-1)
 

@@ -47,10 +47,10 @@ class IOHDataset(Dataset):
             self.target_std = 1.0
 
         if self.verbose:
-            print(f"🔧 [Dataset] Target Normalization Info: Mean={self.target_mean:.2f}, Std={self.target_std:.2f}")
+            print(f"[Dataset] Target normalization: mean={self.target_mean:.2f}, std={self.target_std:.2f}")
 
         if not os.path.exists(pkl_path):
-            raise FileNotFoundError(f"❌ 找不到数据文件: {pkl_path}")
+            raise FileNotFoundError(f"Data file was not found: {pkl_path}")
 
         self.df = pd.read_pickle(pkl_path)
         self._build_cached_arrays()
@@ -61,7 +61,7 @@ class IOHDataset(Dataset):
         if os.path.exists(path):
             return load_yaml_config(path)
         if self.verbose:
-            print(f"⚠️ 警告: 统计文件未找到 {path}，将跳过归一化 (使用原始值)。")
+            print(f"Warning: normalization statistics were not found at {path}; raw values will be used.")
         return {"dynamic": {}, "static": {}}
 
     @staticmethod
@@ -111,7 +111,7 @@ class IOHDataset(Dataset):
     def _print_length_adjust_summary(self):
         if not self.verbose or not hasattr(self, "_length_adjustments") or not self._length_adjustments:
             return
-        print("⚠️ [Dataset] Sequence length mismatches detected and auto-adjusted:")
+        print("[Dataset] Sequence length mismatches detected and auto-adjusted:")
         for (scalar_mode, original_len, expected_len), count in sorted(self._length_adjustments.items()):
             print(
                 f"   - mode={scalar_mode}, original_len={original_len}, "
@@ -237,7 +237,7 @@ class IOHDataset(Dataset):
 
     def _build_cached_arrays(self):
         if self.verbose:
-            print(f"⚙️ [Dataset] Pre-parsing cached arrays from {len(self.df)} samples...")
+            print(f"[Dataset] Pre-parsing cached arrays from {len(self.df)} samples...")
         with tqdm(
             total=4,
             desc="Dataset cache build",
@@ -326,7 +326,7 @@ def _create_ioh_loader(
     pkl_path = os.path.join(cache_dir, pkl_name)
 
     if verbose:
-        print(f"📦 正在准备 {mode} 数据集: {pkl_path}")
+        print(f"Preparing {mode} dataset: {pkl_path}")
     dataset = IOHDataset(pkl_path, config_path, normalize=normalize, verbose=verbose)
 
     loader_kwargs = dict(
@@ -361,7 +361,7 @@ def get_ioh_loaders(
     )
     if verbose:
         print(
-            f"🧵 DataLoader workers: requested={num_workers}, resolved={resolved_workers}, "
+            f"DataLoader workers: requested={num_workers}, resolved={resolved_workers}, "
             f"cpu_count={os.cpu_count()}"
         )
 
@@ -426,7 +426,7 @@ def get_ioh_loader(
     )
     if verbose:
         print(
-            f"🧵 DataLoader workers: requested={num_workers}, resolved={resolved_workers}, "
+            f"DataLoader workers: requested={num_workers}, resolved={resolved_workers}, "
             f"cpu_count={os.cpu_count()}"
         )
     return _create_ioh_loader(
